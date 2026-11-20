@@ -3,11 +3,11 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>실시간 코인 자산 & 손익 트래커</title>
+    <title>실시간 코인 자산 &amp; 손익 트래커</title>
     <!-- Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
     <!-- Google Fonts: Inter & Noto Sans KR -->
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Noto+Sans+KR:wght@400;500;700;800&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&amp;family=Noto+Sans+KR:wght@400;500;700;800&amp;display=swap" rel="stylesheet">
     <!-- Phosphor Icons -->
     <script src="https://unpkg.com/@phosphor-icons/web"></script>
     <!-- Chart.js for Daily Asset History Chart -->
@@ -78,9 +78,10 @@
                     <i class="ph-bold ph-chart-line-up text-white text-lg"></i>
                 </div>
                 <div>
-                    <div class="flex items-center gap-2">
+                    <div class="flex items-center gap-1.5 flex-wrap">
                         <h1 class="font-bold text-base sm:text-lg tracking-tight text-white leading-none">CryptoFolio</h1>
                         <span id="save-status-badge" class="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 font-semibold">자동 저장됨</span>
+                        <span id="cloud-sync-badge" class="text-[10px] px-1.5 py-0.5 rounded bg-slate-700/60 text-slate-300 border border-slate-600/50 font-semibold">로컬 모드</span>
                     </div>
                     <div class="flex items-center gap-1.5 mt-1">
                         <span id="status-dot" class="w-2 h-2 rounded-full bg-emerald-400 pulse-dot"></span>
@@ -273,7 +274,7 @@
 
         <!-- Simple Footer -->
         <footer class="text-center text-[11px] text-slate-500 pt-2 pb-4">
-            <p>업비트(Upbit) 및 OKX 공개 시세 API 연동 · 보유자산과 일별 기록은 브라우저에 자동 저장됩니다.</p>
+            <p>업비트(Upbit) 및 OKX 공개 시세 API 연동 · 보유자산과 일별 기록은 브라우저 및 Firebase 클라우드에 동기화됩니다.</p>
         </footer>
     </main>
 
@@ -433,11 +434,35 @@
         </div>
     </div>
 
+    <!-- Firebase Realtime Database SDK -->
+    <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-database-compat.js"></script>
+
     <script>
         /**
          * ============================================================================
+         * FIREBASE CONFIG & CLOUD SYNC SETUP
+         * ============================================================================
+         */
+        const firebaseConfig = {
+            apiKey: "AIzaSyDP8_LN9Kc8aV90L3ByB3TiO1wkhNEUlek",
+            authDomain: "crypto-tracker-sync-6b0b7.firebaseapp.com",
+            databaseURL: "https://crypto-tracker-sync-6b0b7-default-rtdb.firebaseio.com",
+            projectId: "crypto-tracker-sync-6b0b7",
+            storageBucket: "crypto-tracker-sync-6b0b7.firebasestorage.app",
+            messagingSenderId: "427358620999",
+            appId: "1:427358620999:web:da596ece3a80b5d5671062",
+            measurementId: "G-SDF658RTMF"
+        };
+
+        const CLOUD_SYNC_PATH = 'cryptoPortfolioSync/v1';
+        let cloudDbRef = null;
+        let isApplyingCloudSnapshot = false;
+        let lastSavedTimestamp = 0;
+
+        /**
+         * ============================================================================
          * APPLICATION STATE & MULTI-LAYER PERSISTENCE
-         * (localStorage + Cookie + window.name fallback so holdings are never lost)
          * ============================================================================
          */
         const STORAGE_KEY = 'cryptofolio_portfolio_state_v3';
@@ -497,6 +522,19 @@
                 .filter(Boolean);
         }
 
+        function updateCloudBadge(statusType, text) {
+            const badge = document.getElementById('cloud-sync-badge');
+            if (!badge) return;
+            badge.textContent = text;
+            if (statusType === 'connected') {
+                badge.className = 'text-[10px] px-1.5 py-0.5 rounded bg-sky-500/20 text-sky-300 border border-sky-500/40 font-semibold';
+            } else if (statusType === 'error') {
+                badge.className = 'text-[10px] px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/40 font-semibold';
+            } else {
+                badge.className = 'text-[10px] px-1.5 py-0.5 rounded bg-slate-700/60 text-slate-300 border border-slate-600/50 font-semibold';
+            }
+        }
+
         function flashSavedBadge() {
             const badge = document.getElementById('save-status-badge');
             if (!badge) return;
@@ -509,19 +547,23 @@
             }, 1200);
         }
 
-        /**
-         * Persist state immediately to localStorage, cookie, and window.name.
-         */
-        function saveState() {
-            const payloadObj = {
+        function buildSyncPayload() {
+            const nowTs = Date.now();
+            lastSavedTimestamp = nowTs;
+            return {
                 exchange: state.exchange,
                 krColorMode: state.krColorMode,
                 usdtMode: state.usdtMode,
                 manualUsdtPrice: state.manualUsdtPrice,
                 liveUsdtPrice: state.liveUsdtPrice,
                 coins: state.coins,
-                savedAt: Date.now()
+                dailyHistory: state.dailyHistory,
+                savedAt: nowTs
             };
+        }
+
+        function saveLocalOnly() {
+            const payloadObj = buildSyncPayload();
             const payload = JSON.stringify(payloadObj);
 
             try {
@@ -537,9 +579,7 @@
                 if (encoded.length < 3800) {
                     document.cookie = `${STORAGE_KEY}=${encoded}; max-age=31536000; path=/; SameSite=Lax`;
                 }
-            } catch (e) {
-                // Ignore cookie write restrictions
-            }
+            } catch (e) {}
 
             try {
                 let winStore = {};
@@ -554,12 +594,24 @@
                         window.name = serializedWin;
                     }
                 }
-            } catch (e) {
-                // Ignore window.name issues
-            }
+            } catch (e) {}
 
             saveHistoryState();
             flashSavedBadge();
+            return payloadObj;
+        }
+
+        /**
+         * Persist state locally AND push to Firebase Realtime Database.
+         */
+        function saveState(skipCloudPush = false) {
+            const payloadObj = saveLocalOnly();
+            if (!skipCloudPush && !isApplyingCloudSnapshot && cloudDbRef) {
+                cloudDbRef.set(payloadObj).catch(err => {
+                    console.warn('Firebase write error:', err);
+                    updateCloudBadge('error', 'DB 규칙 확인 필요');
+                });
+            }
         }
 
         function saveHistoryState() {
@@ -578,9 +630,7 @@
                     const parsed = JSON.parse(rawHistory);
                     if (Array.isArray(parsed)) loaded = parsed;
                 }
-            } catch (e) {
-                console.warn('Failed to read history from localStorage:', e);
-            }
+            } catch (e) {}
 
             if (!loaded) {
                 try {
@@ -598,10 +648,6 @@
                 : [];
         }
 
-        /**
-         * Load persisted holdings & settings on startup.
-         * Never overwrites saved coins with empty defaults when a saved coins array exists.
-         */
         function loadState() {
             let parsed = null;
 
@@ -647,16 +693,86 @@
                 }
 
                 const sanitizedCoins = sanitizeCoinList(parsed.coins);
-                if (sanitizedCoins !== null) {
-                    state.coins = sanitizedCoins;
-                } else {
-                    state.coins = cloneDefaultCoins();
-                }
+                state.coins = sanitizedCoins !== null ? sanitizedCoins : cloneDefaultCoins();
             } else {
                 state.coins = cloneDefaultCoins();
             }
 
             loadHistoryState();
+        }
+
+        function initFirebaseCloudSync() {
+            if (!firebaseConfig || !firebaseConfig.databaseURL || typeof firebase === 'undefined') {
+                updateCloudBadge('local', '로컬 모드');
+                return;
+            }
+
+            try {
+                if (!firebase.apps.length) {
+                    firebase.initializeApp(firebaseConfig);
+                }
+                const db = firebase.database();
+                cloudDbRef = db.ref(CLOUD_SYNC_PATH);
+                updateCloudBadge('connected', '클라우드 연결됨');
+
+                cloudDbRef.on('value', (snapshot) => {
+                    const remote = snapshot.val();
+                    if (!remote || typeof remote !== 'object') {
+                        const localObj = saveLocalOnly();
+                        if (state.coins.some(c => c.quantity > 0) || state.dailyHistory.length > 0) {
+                            cloudDbRef.set(localObj).catch(() => {});
+                        }
+                        return;
+                    }
+
+                    const remoteSavedAt = Number(remote.savedAt) || 0;
+                    if (remoteSavedAt > 0 && remoteSavedAt <= lastSavedTimestamp) {
+                        return;
+                    }
+
+                    isApplyingCloudSnapshot = true;
+                    try {
+                        if (remote.exchange === 'OKX' || remote.exchange === 'UPBIT') {
+                            state.exchange = remote.exchange;
+                        }
+                        if (remote.krColorMode !== undefined) {
+                            state.krColorMode = Boolean(remote.krColorMode);
+                        }
+                        if (remote.usdtMode === 'MANUAL' || remote.usdtMode === 'AUTO') {
+                            state.usdtMode = remote.usdtMode;
+                        }
+                        if (Number(remote.manualUsdtPrice) > 0) {
+                            state.manualUsdtPrice = Number(remote.manualUsdtPrice);
+                        }
+                        if (Number(remote.liveUsdtPrice) > 0) {
+                            state.liveUsdtPrice = Number(remote.liveUsdtPrice);
+                        }
+
+                        const sanitizedCoins = sanitizeCoinList(remote.coins);
+                        if (sanitizedCoins !== null) {
+                            state.coins = sanitizedCoins;
+                        }
+
+                        if (Array.isArray(remote.dailyHistory)) {
+                            state.dailyHistory = remote.dailyHistory
+                                .filter(item => item && item.date)
+                                .sort((a, b) => String(b.date).localeCompare(String(a.date)));
+                        }
+
+                        lastSavedTimestamp = remoteSavedAt || Date.now();
+                        saveLocalOnly();
+                        renderAll();
+                    } finally {
+                        isApplyingCloudSnapshot = false;
+                    }
+                }, (error) => {
+                    console.warn('Firebase listener error:', error);
+                    updateCloudBadge('error', 'DB 규칙 확인 필요');
+                });
+            } catch (e) {
+                console.warn('Firebase init error:', e);
+                updateCloudBadge('error', 'DB 연결 오류');
+            }
         }
 
         function getEffectiveUsdtPrice() {
@@ -768,7 +884,7 @@
             }
 
             state.dailyHistory.sort((a, b) => String(b.date).localeCompare(String(a.date)));
-            saveHistoryState();
+            saveState();
             renderDailyHistorySection();
 
             if (isManual) {
@@ -791,7 +907,7 @@
 
         function deleteHistoryRecord(dateStr) {
             state.dailyHistory = state.dailyHistory.filter(item => item.date !== dateStr);
-            saveHistoryState();
+            saveState();
             renderDailyHistorySection();
             showToast(`${dateStr} 기록이 삭제되었습니다.`);
         }
@@ -1062,7 +1178,6 @@
 
             document.getElementById('coin-count-badge').textContent = state.coins.length;
 
-            // Core BTC, ETH, SOL summary bar
             const coreSyms = ['BTC', 'ETH', 'SOL'];
             if (quickSummaryEl) {
                 quickSummaryEl.innerHTML = coreSyms.map(coreSym => {
@@ -1082,7 +1197,6 @@
                 }).join('');
             }
 
-            // Compute totals first
             state.coins.forEach(coin => {
                 const sym = coin.symbol.toUpperCase();
                 const marketData = state.prices[state.exchange]?.[sym] || { krw: 0, usdt: 0 };
@@ -1110,7 +1224,6 @@
                 totalEvalUsdt += qty * currentUsdt;
             });
 
-            // Avoid re-rendering input elements mid-keystroke so mobile keyboard/focus stays intact
             if (!isUserActivelyTypingInline()) {
                 if (state.coins.length === 0) {
                     container.innerHTML = `
@@ -1859,6 +1972,7 @@
         window.addEventListener('DOMContentLoaded', () => {
             loadState();
             renderAll();
+            initFirebaseCloudSync();
             fetchAllPrices();
 
             pollingTimer = setInterval(() => {
@@ -1869,17 +1983,6 @@
                 checkAndRunAuto0900Record();
             }, 15000);
         });
-
-const firebaseConfig = {
-  apiKey: "AIzaSyDP8_LN9Kc8aV90L3ByB3TiO1wkhNEUlek",
-  authDomain: "crypto-tracker-sync-6b0b7.firebaseapp.com",
-  databaseURL: "https://crypto-tracker-sync-6b0b7-default-rtdb.firebaseio.com",
-  projectId: "crypto-tracker-sync-6b0b7",
-  storageBucket: "crypto-tracker-sync-6b0b7.firebasestorage.app",
-  messagingSenderId: "427358620999",
-  appId: "1:427358620999:web:da596ece3a80b5d5671062",
-  measurementId: "G-SDF658RTMF"
-};
     </script>
 </body>
 </html>
